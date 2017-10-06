@@ -435,11 +435,6 @@ int ft_open_fabric_res(void)
 int ft_alloc_ep_res(struct fi_info *fi)
 {
 	int ret;
-	if (hints->caps & FI_RMA) {
-		ret = ft_set_rma_caps(fi, opts.rma_op);
-		if (ret)
-			return ret;
-	}
 
 	ret = ft_alloc_msgs();
 	if (ret)
@@ -452,14 +447,12 @@ int ft_alloc_ep_res(struct fi_info *fi)
 			cq_attr.format = FI_CQ_FORMAT_CONTEXT;
 	}
 
-	if (opts.options & FT_OPT_TX_CQ) {
-		ft_cq_set_wait_attr();
-		cq_attr.size = fi->tx_attr->size;
-		ret = fi_cq_open(domain, &cq_attr, &txcq, &txcq);
-		if (ret) {
-			FT_PRINTERR("fi_cq_open", ret);
-			return ret;
-		}
+	ft_cq_set_wait_attr();
+	cq_attr.size = fi->tx_attr->size;
+	ret = fi_cq_open(domain, &cq_attr, &txcq, &txcq);
+	if (ret) {
+		FT_PRINTERR("fi_cq_open", ret);
+		return ret;
 	}
 
 	if (opts.options & FT_OPT_TX_CNTR) {
@@ -471,14 +464,12 @@ int ft_alloc_ep_res(struct fi_info *fi)
 		}
 	}
 
-	if (opts.options & FT_OPT_RX_CQ) {
-		ft_cq_set_wait_attr();
-		cq_attr.size = fi->rx_attr->size;
-		ret = fi_cq_open(domain, &cq_attr, &rxcq, &rxcq);
-		if (ret) {
-			FT_PRINTERR("fi_cq_open", ret);
-			return ret;
-		}
+	ft_cq_set_wait_attr();
+	cq_attr.size = fi->rx_attr->size;
+	ret = fi_cq_open(domain, &cq_attr, &rxcq, &rxcq);
+	if (ret) {
+		FT_PRINTERR("fi_cq_open", ret);
+		return ret;
 	}
 
 	if (opts.options & FT_OPT_RX_CNTR) {
@@ -520,27 +511,6 @@ int ft_alloc_active_res(struct fi_info *fi)
 		return ret;
 	}
 
-	return 0;
-}
-
-int ft_set_rma_caps(struct fi_info *fi, enum ft_rma_opcodes rma_op)
-{
-	switch (rma_op) {
-	case FT_RMA_READ:
-		fi->caps |= FI_REMOTE_READ;
-		if (fi->mode & FI_LOCAL_MR)
-			fi->caps |= FI_READ;
-		break;
-	case FT_RMA_WRITE:
-	case FT_RMA_WRITEDATA:
-		fi->caps |= FI_REMOTE_WRITE;
-		if (fi->mode & FI_LOCAL_MR)
-			fi->caps |= FI_WRITE;
-		break;
-	default:
-		FT_ERR("Invalid rma op type\n");
-		return -FI_EINVAL;
-	}
 	return 0;
 }
 
@@ -780,12 +750,6 @@ int ft_init_fabric(void)
 	if (ret)
 		return ret;
 
-	if (hints->caps & FI_RMA) {
-		ret = ft_set_rma_caps(fi, opts.rma_op);
-		if (ret)
-			return ret;
-	}
-
 	ret = ft_alloc_active_res(fi);
 	if (ret)
 		return ret;
@@ -852,13 +816,20 @@ int ft_setup_ep(struct fid_ep *ep, struct fid_eq *eq,
 		return ret;
 
 	/* TODO: use control structure to select counter bindings explicitly */
-	flags = !txcq ? FI_SEND : 0;
+	if (opts.options & FT_OPT_TX_CQ)
+		flags = 0;
+	else
+		flags = FI_SEND;
 	if (hints->caps & (FI_WRITE | FI_READ))
 		flags |= hints->caps & (FI_WRITE | FI_READ);
 	else if (hints->caps & FI_RMA)
 		flags |= FI_WRITE | FI_READ;
 	FT_EP_BIND(ep, txcntr, flags);
-	flags = !rxcq ? FI_RECV : 0;
+
+	if (opts.options & FT_OPT_RX_CQ)
+		flags = 0;
+	else
+		flags = FI_RECV;
 	if (hints->caps & (FI_REMOTE_WRITE | FI_REMOTE_READ))
 		flags |= hints->caps & (FI_REMOTE_WRITE | FI_REMOTE_READ);
 	else if (hints->caps & FI_RMA)
@@ -1320,7 +1291,7 @@ static int ft_inject_progress(uint64_t total)
 	struct fi_cq_err_entry comp;
 	int ret;
 
-	if (txcq) {
+	if (opts.options & FT_OPT_TX_CQ) {
 		if (opts.comp_method == FT_COMP_SREAD)
 			ret = fi_cq_sread(txcq, &comp, 1, NULL, 0);
 		else
@@ -1743,7 +1714,7 @@ int ft_get_rx_comp(uint64_t total)
 {
 	int ret = FI_SUCCESS;
 
-	if (rxcq) {
+	if (opts.options & FT_OPT_RX_CQ) {
 		ret = ft_get_cq_comp(rxcq, &rx_cq_cntr, total, timeout);
 	} else if (rxcntr) {
 		while (fi_cntr_read(rxcntr) < total) {
@@ -1764,7 +1735,7 @@ int ft_get_tx_comp(uint64_t total)
 {
 	int ret;
 
-	if (txcq) {
+	if (opts.options & FT_OPT_TX_CQ) {
 		ret = ft_get_cq_comp(txcq, &tx_cq_cntr, total, -1);
 	} else if (txcntr) {
 		ret = fi_cntr_wait(txcntr, total, -1);
@@ -2230,16 +2201,22 @@ void ft_parsecsopts(int op, char *optarg, struct ft_opts *opts)
 	}
 }
 
-int ft_parse_rma_opts(int op, char *optarg, struct ft_opts *opts)
+int ft_parse_rma_opts(int op, char *optarg, struct fi_info *hints,
+		      struct ft_opts *opts)
 {
 	switch (op) {
 	case 'o':
 		if (!strcmp(optarg, "read")) {
+			hints->caps |= FI_READ | FI_REMOTE_READ;
 			opts->rma_op = FT_RMA_READ;
 		} else if (!strcmp(optarg, "writedata")) {
+			hints->caps |= FI_WRITE | FI_REMOTE_WRITE;
+			hints->mode |= FI_RX_CQ_DATA;
+			hints->domain_attr->cq_data_size = 4;
 			opts->rma_op = FT_RMA_WRITEDATA;
 			cq_attr.format = FI_CQ_FORMAT_DATA;
 		} else if (!strcmp(optarg, "write")) {
+			hints->caps |= FI_WRITE | FI_REMOTE_WRITE;
 			opts->rma_op = FT_RMA_WRITE;
 		} else {
 			fprintf(stderr, "Invalid operation type: \"%s\". Usage:\n"

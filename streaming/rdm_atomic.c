@@ -153,9 +153,14 @@ static void report_perf()
 
 static int run_op(void)
 {
-	int ret, i, len;
+	int ret = -FI_EINVAL, i, len;
 
-	count = (size_t *) malloc(sizeof(size_t));
+	count = (size_t *)malloc(sizeof(*count));
+	if (!count) {
+		ret = -FI_ENOMEM;
+		perror("malloc");
+		goto fn;
+	}
 	ft_sync();
 
 	switch (op_type) {
@@ -266,11 +271,11 @@ static int run_op(void)
 		}
 		break;
 	default:
-		ret = -EINVAL;
 		break;
 	}
 
 	free(count);
+fn:
 	return ret;
 }
 
