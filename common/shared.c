@@ -59,6 +59,7 @@ struct fid_ep *ep, *alias_ep;
 struct fid_cq *txcq, *rxcq;
 struct fid_cntr *txcntr, *rxcntr;
 struct fid_mr *mr;
+void *mr_desc = NULL;
 struct fid_av *av;
 struct fid_eq *eq;
 struct fid_mc *mc;
@@ -160,13 +161,13 @@ static int ft_poll_fd(int fd, int timeout)
 	return ret;
 }
 
-size_t ft_tx_prefix_size()
+size_t ft_tx_prefix_size(void)
 {
 	return (fi->tx_attr->mode & FI_MSG_PREFIX) ?
 		fi->ep_attr->msg_prefix_size : 0;
 }
 
-size_t ft_rx_prefix_size()
+size_t ft_rx_prefix_size(void)
 {
 	return (fi->rx_attr->mode & FI_MSG_PREFIX) ?
 		fi->ep_attr->msg_prefix_size : 0;
@@ -225,7 +226,7 @@ int ft_cntr_open(struct fid_cntr **cntr)
 	return fi_cntr_open(domain, &cntr_attr, cntr, cntr);
 }
 
-int ft_rma_read_target_allowed(uint64_t caps)
+static inline int ft_rma_read_target_allowed(uint64_t caps)
 {
 	if (caps & (FI_RMA | FI_ATOMIC)) {
 		if (caps & FI_REMOTE_READ)
@@ -235,7 +236,7 @@ int ft_rma_read_target_allowed(uint64_t caps)
 	return 0;
 }
 
-int ft_rma_write_target_allowed(uint64_t caps)
+static inline int ft_rma_write_target_allowed(uint64_t caps)
 {
 	if (caps & (FI_RMA | FI_ATOMIC)) {
 		if (caps & FI_REMOTE_WRITE)
@@ -245,10 +246,16 @@ int ft_rma_write_target_allowed(uint64_t caps)
 	return 0;
 }
 
+static inline int ft_check_mr_local_flag(struct fi_info *info)
+{
+	return ((info->mode & FI_LOCAL_MR) ||
+		(info->domain_attr->mr_mode & FI_MR_LOCAL));
+}
+
 uint64_t ft_info_to_mr_access(struct fi_info *info)
 {
 	uint64_t mr_access = 0;
-	if ((info->mode & FI_LOCAL_MR) || (info->domain_attr->mr_mode & FI_MR_LOCAL)) {
+	if (ft_check_mr_local_flag(info)) {
 		if (info->caps & (FI_MSG | FI_TAGGED)) {
 			if (info->caps & FT_MSG_MR_ACCESS) {
 				mr_access |= info->caps & FT_MSG_MR_ACCESS;
@@ -395,6 +402,7 @@ int ft_alloc_msgs(void)
 			FT_PRINTERR("fi_mr_reg", ret);
 			return ret;
 		}
+		mr_desc = ft_check_mr_local_flag(fi) ? fi_mr_desc(mr) : NULL;
 	} else {
 		if (ft_mr_alloc_func) {
 			ret = ft_mr_alloc_func();
@@ -1359,13 +1367,14 @@ static int ft_inject_progress(uint64_t total)
 
 ssize_t ft_post_tx(struct fid_ep *ep, fi_addr_t fi_addr, size_t size, struct fi_context* ctx)
 {
+
 	if (hints->caps & FI_TAGGED) {
 		FT_POST(fi_tsend, ft_get_tx_comp, tx_seq, "transmit", ep,
-				tx_buf, size + ft_tx_prefix_size(), fi_mr_desc(mr),
+				tx_buf, size + ft_tx_prefix_size(), mr_desc,
 				fi_addr, ft_tag ? ft_tag : tx_seq, ctx);
 	} else {
 		FT_POST(fi_send, ft_get_tx_comp, tx_seq, "transmit", ep,
-				tx_buf,	size + ft_tx_prefix_size(), fi_mr_desc(mr),
+				tx_buf,	size + ft_tx_prefix_size(), mr_desc,
 				fi_addr, ctx);
 	}
 	return 0;
@@ -1422,19 +1431,18 @@ ssize_t ft_post_rma(enum ft_rma_opcodes op, struct fid_ep *ep, size_t size,
 	switch (op) {
 	case FT_RMA_WRITE:
 		FT_POST(fi_write, ft_get_tx_comp, tx_seq, "fi_write", ep, tx_buf,
-				opts.transfer_size, fi_mr_desc(mr), remote_fi_addr,
-				remote->addr, remote->key, context);
+			opts.transfer_size, mr_desc, remote_fi_addr, remote->addr,
+			remote->key, context);
 		break;
 	case FT_RMA_WRITEDATA:
 		FT_POST(fi_writedata, ft_get_tx_comp, tx_seq, "fi_writedata", ep,
-				tx_buf, opts.transfer_size, fi_mr_desc(mr),
-				remote_cq_data,	remote_fi_addr,	remote->addr,
-				remote->key, context);
+			tx_buf, opts.transfer_size, mr_desc, remote_cq_data, remote_fi_addr,
+			remote->addr, remote->key, context);
 		break;
 	case FT_RMA_READ:
 		FT_POST(fi_read, ft_get_tx_comp, tx_seq, "fi_read", ep, rx_buf,
-				opts.transfer_size, fi_mr_desc(mr), remote_fi_addr,
-				remote->addr, remote->key, context);
+			opts.transfer_size, mr_desc, remote_fi_addr, remote->addr,
+			remote->key, context);
 		break;
 	default:
 		FT_ERR("Unknown RMA op type\n");
@@ -1559,11 +1567,11 @@ ssize_t ft_post_rx(struct fid_ep *ep, size_t size, struct fi_context* ctx)
 	if (hints->caps & FI_TAGGED) {
 		FT_POST(fi_trecv, ft_get_rx_comp, rx_seq, "receive", ep, rx_buf,
 				MAX(size, FT_MAX_CTRL_MSG) + ft_rx_prefix_size(),
-				fi_mr_desc(mr), 0, ft_tag ? ft_tag : rx_seq, 0, ctx);
+				mr_desc, 0, ft_tag ? ft_tag : rx_seq, 0, ctx);
 	} else {
 		FT_POST(fi_recv, ft_get_rx_comp, rx_seq, "receive", ep, rx_buf,
 				MAX(size, FT_MAX_CTRL_MSG) + ft_rx_prefix_size(),
-				fi_mr_desc(mr),	0, ctx);
+				mr_desc, 0, ctx);
 	}
 	return 0;
 }
@@ -1788,7 +1796,7 @@ void eq_readerr(struct fid_eq *eq, const char *eq_str)
 	}
 }
 
-int ft_sync()
+int ft_sync(void)
 {
 	int ret;
 
@@ -1845,7 +1853,7 @@ int ft_sync_pair(int status)
 	return 0;
 }
 
-int ft_fork_and_pair()
+int ft_fork_and_pair(void)
 {
 	int ret;
 
@@ -1866,7 +1874,7 @@ int ft_fork_and_pair()
 	return 0;
 }
 
-int ft_wait_child()
+int ft_wait_child(void)
 {
 	int ret;
 
@@ -1896,7 +1904,6 @@ int ft_finalize(void)
 	struct iovec iov;
 	int ret;
 	struct fi_context ctx;
-	void *desc = fi_mr_desc(mr);
 
 	strcpy(tx_buf + ft_tx_prefix_size(), "fin");
 	iov.iov_base = tx_buf;
@@ -1907,7 +1914,7 @@ int ft_finalize(void)
 
 		memset(&tmsg, 0, sizeof tmsg);
 		tmsg.msg_iov = &iov;
-		tmsg.desc = &desc;
+		tmsg.desc = &mr_desc;
 		tmsg.iov_count = 1;
 		tmsg.addr = remote_fi_addr;
 		tmsg.tag = tx_seq;
@@ -1920,7 +1927,7 @@ int ft_finalize(void)
 
 		memset(&msg, 0, sizeof msg);
 		msg.msg_iov = &iov;
-		msg.desc = &desc;
+		msg.desc = &mr_desc;
 		msg.iov_count = 1;
 		msg.addr = remote_fi_addr;
 		msg.context = &ctx;
