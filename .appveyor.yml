@@ -11,6 +11,7 @@ install:
   - cd ..
   - git clone https://github.com/ofiwg/libfabric
   - cd libfabric
+  - git checkout -b v1.5.x origin/v1.5.x
   - ps: .appveyor.ps1 -Verbose
   - msbuild libfabric.sln
   - set PATH=%CD%\x64\%CONFIGURATION%;%PATH%
